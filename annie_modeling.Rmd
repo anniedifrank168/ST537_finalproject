@@ -5,25 +5,118 @@ date: "2025-03-25"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+#pacman to check whether packages are installed, if not load them
+if (!require("pacman")) install.packages("pacman")
+library(pacman)
+pacman::p_load(dplyr,
+ tidyverse,
+ purrr,
+ ggplot2,
+ gridExtra,
+ MASS,
+ readr,
+ psych,
+ reshape2,
+ GGally)
 ```
 
-## R Markdown
+## Data Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+The [Taiwanese Bankruptcy Prediction dataset](https://archive.ics.uci.edu/dataset/572/taiwanese+bankruptcy+prediction) was donated on 6/27/2020. The data were collected from the Taiwan Economic Journal, years 1999-2009. They defined company bankruptcy based on the business regulations of the Taiwan Stock Exchange. This is a multivariate dataset with a classification outcome (Bankrupt or not). There are a total of 6,819 observations and 95 variables. We are interested in a subset of variables to predict bankruptcy:
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+-   Operating Gross Margin (continuous)
 
-```{r cars}
-summary(cars)
+-   Operation Profit Rate (continuous)
+
+-   Operating Express Rate (continuous)
+
+-   Revenue per person (continuous)
+
+-   Degree of Financial leverage (DFL) (continuous)
+
+Before any analysis of the data, we will first perform exploratory data analysis.
+
+## Loading in the data 
+
+```{r data import}
+bank_data <- read_csv("data.csv")
+
+#filtering down to columns of interest 
+bank_data <- bank_data %>% select(c("Bankrupt?","Operating Gross Margin","Operating Profit Rate","Operating Expense Rate","Revenue per person","Degree of Financial Leverage (DFL)"))
+
+#renaming variables for easier column selection
+colnames(bank_data) = c("Bankrupt","OGM","OPR","OER","RPP","DFL")
+
+#changing bankrupt to a factor variable 
+bank_data$Bankrupt = as.factor(bank_data$Bankrupt)
+
+describe(bank_data)
 ```
 
-## Including Plots
+There are no missing variables. All summary statistics seem reasonable for each data type.
 
-You can also embed plots, for example:
+Checking the correlation between variables:
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r corr_check}
+cor(bank_data[c("OGM","OPR","OER","RPP","DFL")])
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+There does not appear to be any of-note correlation/linear relationships between variables. The strongest correlation is between operating gross margin and operating expense rate at -0.21, which is still a week correlation.
+
+We next want to check if assumptions of normality are appropriate. First, we can look at univariate normality via QQ plots.
+
+```{r}
+# Create a list of columns to plot
+data_list <- bank_data[, c("OGM", "OPR", "OER", "RPP", "DFL")]
+
+# Generate QQ plots for each column
+qq_plots <- lapply(names(data_list), function(name) {
+  ggplot(data.frame(x = data_list[[name]]), aes(sample = x)) +
+    stat_qq() + stat_qq_line() +
+    ggtitle(paste("QQ Plot of", name)) +
+    theme_minimal()
+})
+
+# Arrange all plots in a grid
+grid.arrange(grobs = qq_plots, nrow = 2, ncol = 3)
+```
+
+For OGM, OPR, RPP, and DFL, there are a few minor departures from normality, but considering how large our data set is, we can assume normality for these variable.
+
+We see large departures from normality for the OER variable. The Shapiro-Wilk normality test could be used, however this test is for samples of under 5000 size. Because we are looking at data of very large size, we should be okay to assume univariate normality for all variables.
+
+Central Limit Theorem (CLT) says when n is large enough, X\^ approximately has a N(u,sigma\^2/n) distribution. This holds for multivariate normal distribution. We can assume this distribution, but let's look at chisquare plot just in case.
+
+```{r}
+#function to create Chi-Square Q-Q Plot
+chisq_qq_plot <- function(data, title = "Chi-Square Q-Q Plot for Multivariate Normality") {
+  #data must be matrix- Check if data is a matrix or convert to matrix
+  data_matrix <- as.matrix(data)
+  
+  #compute Mahalanobis distances
+  mu <- colMeans(data_matrix)  # Mean vector
+  sigma <- cov(data_matrix)    # Covariance matrix
+  md <- mahalanobis(data_matrix, center = mu, cov = sigma)
+  
+  #compute theoretical quantiles
+  n <- nrow(data_matrix)
+  df <- ncol(data_matrix)  # Degrees of freedom = number of variables
+  chi_sq_quantiles <- qchisq((1:n) / (n + 1), df)
+  
+  #create a data frame for plotting
+  qq_data <- data.frame(
+    Theoretical = chi_sq_quantiles,
+    Observed = sort(md)
+  )
+  
+  ggplot(qq_data, aes(x = Theoretical, y = Observed)) +
+    geom_point(color = "blue") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+    ggtitle(title) +
+    xlab("Theoretical Quantiles (Chi-Square)") +
+    ylab("Observed Mahalanobis Distances") +
+    theme_minimal()
+}
+
+chisq_qq_plot(bank_data[,2:6])
+```

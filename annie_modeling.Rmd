@@ -10,14 +10,18 @@ if (!require("pacman")) install.packages("pacman")
 library(pacman)
 pacman::p_load(dplyr,
  tidyverse,
+ tidymodels,
  purrr,
  ggplot2,
  gridExtra,
  MASS,
  readr,
  psych,
- reshape2,
- GGally)
+ caret,
+ class,
+ rpart,
+ rattle
+)
 ```
 
 ## Data Introduction
@@ -36,13 +40,13 @@ The [Taiwanese Bankruptcy Prediction dataset](https://archive.ics.uci.edu/datase
 
 Before any analysis of the data, we will first perform exploratory data analysis.
 
-## Loading in the data 
+## Loading in the data
 
 ```{r data import}
 bank_data <- read_csv("data.csv")
 
 #filtering down to columns of interest 
-bank_data <- bank_data %>% select(c("Bankrupt?","Operating Gross Margin","Operating Profit Rate","Operating Expense Rate","Revenue per person","Degree of Financial Leverage (DFL)"))
+bank_data <- bank_data %>% dplyr::select("Bankrupt?","Operating Gross Margin","Operating Profit Rate","Operating Expense Rate","Revenue per person","Degree of Financial Leverage (DFL)")
 
 #renaming variables for easier column selection
 colnames(bank_data) = c("Bankrupt","OGM","OPR","OER","RPP","DFL")
@@ -85,38 +89,109 @@ For OGM, OPR, RPP, and DFL, there are a few minor departures from normality, but
 
 We see large departures from normality for the OER variable. The Shapiro-Wilk normality test could be used, however this test is for samples of under 5000 size. Because we are looking at data of very large size, we should be okay to assume univariate normality for all variables.
 
-Central Limit Theorem (CLT) says when n is large enough, X\^ approximately has a N(u,sigma\^2/n) distribution. This holds for multivariate normal distribution. We can assume this distribution, but let's look at chisquare plot just in case.
+Central Limit Theorem (CLT) says when n is large enough, X\^ approximately has a N(u,sigma\^2/n) distribution. This holds for multivariate normal distribution.
+
+## Modeling 
+
+train test split
 
 ```{r}
-#function to create Chi-Square Q-Q Plot
-chisq_qq_plot <- function(data, title = "Chi-Square Q-Q Plot for Multivariate Normality") {
-  #data must be matrix- Check if data is a matrix or convert to matrix
-  data_matrix <- as.matrix(data)
-  
-  #compute Mahalanobis distances
-  mu <- colMeans(data_matrix)  # Mean vector
-  sigma <- cov(data_matrix)    # Covariance matrix
-  md <- mahalanobis(data_matrix, center = mu, cov = sigma)
-  
-  #compute theoretical quantiles
-  n <- nrow(data_matrix)
-  df <- ncol(data_matrix)  # Degrees of freedom = number of variables
-  chi_sq_quantiles <- qchisq((1:n) / (n + 1), df)
-  
-  #create a data frame for plotting
-  qq_data <- data.frame(
-    Theoretical = chi_sq_quantiles,
-    Observed = sort(md)
-  )
-  
-  ggplot(qq_data, aes(x = Theoretical, y = Observed)) +
-    geom_point(color = "blue") +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
-    ggtitle(title) +
-    xlab("Theoretical Quantiles (Chi-Square)") +
-    ylab("Observed Mahalanobis Distances") +
-    theme_minimal()
+set.seed(123) #for reproducibility
+
+#80/20 train test split 
+train_index <- initial_split(bank_data, prop = 0.8)
+train_data <- training(train_index)
+test_data <- testing(train_index)
+```
+
+set up cv
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary, savePredictions = "final")
+
+```
+
+kNN model (tuning K)
+
+**Tuned Parameter:** `k`: Number of neighbors considered when making a prediction
+
+```{r}
+# Convert outcome to factor with level names
+train_data$`Bankrupt` <- factor(train_data$`Bankrupt`, labels = c("No", "Yes"))
+test_data$`Bankrupt` <- factor(test_data$`Bankrupt`, labels = c("No", "Yes"))
+
+knn_fit <- train(
+  `Bankrupt` ~ ., data = train_data,
+  method = "knn",
+  trControl = ctrl,
+  tuneLength = 10,  # automatically tries 10 values of k
+  metric = "ROC"
+)
+```
+
+logistic regression
+
+```{r}
+logit_fit <- glm(`Bankrupt` ~ ., data = train_data, family = binomial)
+
+# Predict on test set
+logit_probs <- predict(logit_fit, newdata = test_data, type = "response")
+logit_preds <- ifelse(logit_probs > 0.5, "Yes", "No")
+logit_preds <- factor(logit_preds, levels = c("No", "Yes"))
+
+logit_fit$coefficients
+```
+
+classification tree
+
+**Tuned Parameter:**
+
+`cp`: Complexity parameter (controls pruning --- higher `cp` means smaller tree)
+
+```{r}
+
+tree_fit <- train(
+  `Bankrupt` ~ ., data = train_data,
+  method = "rpart",
+  trControl = ctrl,
+  tuneLength = 10
+)
+
+
+# Visualize the tree
+fancyRpartPlot(tree_fit$finalModel)
+```
+
+evaluate models
+
+```{r}
+# For caret models
+eval_model <- function(model, test_data) {
+  preds <- predict(model, newdata = test_data)
+  cm <- confusionMatrix(preds, test_data$`Bankrupt`)
+  aper <- 1 - cm$overall["Accuracy"]
+  list(Accuracy = cm$overall["Accuracy"], Kappa = cm$overall["Kappa"], APER = aper)
 }
 
-chisq_qq_plot(bank_data[,2:6])
+knn_eval <- eval_model(knn_fit, test_data)
+tree_eval <- eval_model(tree_fit, test_data)
+
+# For logistic regression (separate since it's not caret)
+logit_cm <- confusionMatrix(logit_preds, test_data$`Bankrupt`)
+logit_aper <- 1 - logit_cm$overall["Accuracy"]
+logit_eval <- list(Accuracy = logit_cm$overall["Accuracy"], Kappa = logit_cm$overall["Kappa"], APER = logit_aper)
+
+```
+
+compare models
+
+```{r}
+model_results <- data.frame(
+  Model = c("kNN", "Logistic Regression", "Decision Tree"),
+  Accuracy = c(knn_eval$Accuracy, logit_eval$Accuracy, tree_eval$Accuracy),
+  Kappa = c(knn_eval$Kappa, logit_eval$Kappa, tree_eval$Kappa),
+  APER = c(knn_eval$APER, logit_eval$APER, tree_eval$APER)
+)
+
+print(model_results)
 ```
